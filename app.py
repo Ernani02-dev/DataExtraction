@@ -1,0 +1,86 @@
+import streamlit as st
+import pandas as pd
+import io
+import os
+from PIL import Image
+
+# Importar funciones de main.py
+from main import pdf_to_image, image_to_base64, process_single_invoice
+
+st.set_page_config(page_title="Procesador de Facturas", page_icon="📄", layout="wide")
+
+st.title("📄 Automatización de Extracción de Facturas")
+st.write("Sube tus facturas (PDF, PNG, JPG) y extrae automáticamente los datos en formato Excel utilizando la IA de Gemini.")
+
+uploaded_files = st.file_uploader(
+    "Arrastra y suelta tus facturas aquí", 
+    type=["pdf", "png", "jpg", "jpeg"], 
+    accept_multiple_files=True
+)
+
+if uploaded_files:
+    if st.button("Procesar Facturas", type="primary"):
+        results = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, uploaded_file in enumerate(uploaded_files):
+            status_text.text(f"Procesando: {uploaded_file.name} ({i+1}/{len(uploaded_files)})")
+            
+            try:
+                # Determinar extensión
+                file_ext = os.path.splitext(uploaded_file.name)[1].lower()
+                
+                # Leer bytes del archivo subido
+                file_bytes = uploaded_file.read()
+                
+                # Convertir a imagen según el tipo de archivo
+                if file_ext == '.pdf':
+                    img = pdf_to_image(file_bytes, is_bytes=True)
+                else:
+                    img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+                    
+                # Convertir a base64
+                img_b64 = image_to_base64(img)
+                
+                # Extraer datos con Gemini
+                data_dict = process_single_invoice(img_b64, uploaded_file.name)
+                results.append(data_dict)
+                
+            except Exception as e:
+                st.error(f"Error procesando {uploaded_file.name}: {str(e)}")
+                
+            progress_bar.progress((i + 1) / len(uploaded_files))
+            
+        status_text.text("¡Procesamiento finalizado!")
+        
+        if results:
+            st.success(f"Se procesaron {len(results)} facturas con éxito.")
+            df_new = pd.DataFrame(results)
+            
+            # Reordenar columnas para mejor lectura
+            cols_order = ['archivo_origen', 'nro_factura', 'ruc_vendedor', 'fecha', 'timbrado', 
+                          'monto_total', 'gravado_10', 'gravado_5', 'exenta', 'suma_validada']
+            
+            # Asegurar que todas las columnas existan
+            for c in cols_order:
+                if c not in df_new.columns:
+                    df_new[c] = None
+            df_new = df_new[cols_order]
+            
+            # Mostrar tabla interactiva
+            st.dataframe(df_new, use_container_width=True)
+            
+            # Preparar archivo Excel para descarga
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_new.to_excel(writer, index=False)
+            
+            excel_data = output.getvalue()
+            
+            st.download_button(
+                label="📥 Descargar Excel",
+                data=excel_data,
+                file_name="facturas_procesadas_web.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
