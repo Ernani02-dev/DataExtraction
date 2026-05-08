@@ -12,6 +12,10 @@ st.set_page_config(page_title="Procesador de Facturas", page_icon="📄", layout
 st.title("📄 Automatización de Extracción de Facturas")
 st.write("Sube tus facturas (PDF, PNG, JPG) y extrae automáticamente los datos en formato Excel utilizando la IA de Gemini.")
 
+st.markdown("### Configuración")
+tipo_factura_ui = st.radio("Selecciona el tipo de facturas que vas a procesar:", ["Compras (Recibidas)", "Ventas (Emitidas)"], horizontal=True)
+tipo_factura_str = "compra" if "Compras" in tipo_factura_ui else "venta"
+
 uploaded_files = st.file_uploader(
     "Arrastra y suelta tus facturas aquí", 
     type=["pdf", "png", "jpg", "jpeg"], 
@@ -44,7 +48,7 @@ if uploaded_files:
                 img_b64 = image_to_base64(img)
                 
                 # Extraer datos con Gemini
-                data_dict = process_single_invoice(img_b64, uploaded_file.name)
+                data_dict = process_single_invoice(img_b64, uploaded_file.name, tipo_factura_str)
                 results.append(data_dict)
                 
             except Exception as e:
@@ -59,7 +63,8 @@ if uploaded_files:
             df_new = pd.DataFrame(results)
             
             # Reordenar columnas para mejor lectura
-            cols_order = ['archivo_origen', 'nro_factura', 'ruc_vendedor', 'fecha', 'timbrado', 
+            ruc_col = 'ruc_cliente' if tipo_factura_str == 'venta' else 'ruc_vendedor'
+            cols_order = ['archivo_origen', 'nro_factura', ruc_col, 'fecha', 'timbrado', 
                           'monto_total', 'gravado_10', 'gravado_5', 'exenta', 'suma_validada']
             
             # Asegurar que todas las columnas existan
@@ -78,9 +83,11 @@ if uploaded_files:
             
             excel_data = output.getvalue()
             
+            nombre_excel = f"facturas_procesadas_{tipo_factura_str}s_web.xlsx"
+            
             st.download_button(
                 label="📥 Descargar Excel",
                 data=excel_data,
-                file_name="facturas_procesadas_web.xlsx",
+                file_name=nombre_excel,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
