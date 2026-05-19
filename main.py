@@ -17,7 +17,7 @@ load_dotenv()
 
 class InvoiceData(BaseModel):
     """Esquema de datos para la extracción de información de la factura."""
-    nro_factura: Optional[str] = Field(description="Número identificador de la factura.")
+    nro_factura: Optional[str] = Field(description="Número identificador de la factura con formato xxx-xxx-xxxxxxx.")
     ruc_vendedor: Optional[str] = Field(description="RUC de la empresa que vende o emite la factura.")
     ruc_cliente: Optional[str] = Field(description="RUC del cliente que compra o a quien va dirigida la factura.")
     fecha: Optional[str] = Field(description="Fecha de emisión en formato DD/MM/YYYY.")
@@ -137,19 +137,35 @@ def process_invoices(input_folder: str = "input_facturas", output_excel: str = "
         try:
             ext_lower = os.path.splitext(file_path)[1].lower()
             if ext_lower == '.pdf':
-                # 1. Convertir primera página a imagen
-                img = pdf_to_image(file_path, is_bytes=False)
+                # Procesar todas las páginas del PDF
+                doc = fitz.open(file_path)
+                num_pages = len(doc)
+                doc.close()
+                
+                for page_num in range(num_pages):
+                    img = pdf_to_image(file_path, is_bytes=False, page_num=page_num)
+                    img_b64 = image_to_base64(img)
+                    
+                    nombre_mostrar = f"{os.path.basename(file_path)} (Pág. {page_num+1})" if num_pages > 1 else os.path.basename(file_path)
+                    
+                    data_dict = process_single_invoice(img_b64, nombre_mostrar, tipo_factura)
+                    
+                    # Filtrar páginas que no parecen facturas
+                    if data_dict.get('nro_factura') is None and data_dict.get('monto_total') is None:
+                        continue
+                        
+                    results.append(data_dict)
+                    print(f"  -> Pág. {page_num+1}: Éxito. Validado (Suma correcta): {data_dict['suma_validada']}")
             else:
                 # 1. Cargar imagen directamente
                 img = Image.open(file_path).convert("RGB")
+                img_b64 = image_to_base64(img)
                 
-            img_b64 = image_to_base64(img)
-            
-            # 2. Extraer y validar datos
-            data_dict = process_single_invoice(img_b64, os.path.basename(file_path), tipo_factura)
-            
-            results.append(data_dict)
-            print(f"  -> Éxito. Validado (Suma correcta): {data_dict['suma_validada']}")
+                # 2. Extraer y validar datos
+                data_dict = process_single_invoice(img_b64, os.path.basename(file_path), tipo_factura)
+                
+                results.append(data_dict)
+                print(f"  -> Éxito. Validado (Suma correcta): {data_dict['suma_validada']}")
             
         except Exception as e:
             print(f"  -> Error procesando {file_path}: {e}")

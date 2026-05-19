@@ -38,18 +38,37 @@ if uploaded_files:
                 # Leer bytes del archivo subido
                 file_bytes = uploaded_file.read()
                 
-                # Convertir a imagen según el tipo de archivo
+                # Convertir a imagen y extraer según el tipo de archivo
                 if file_ext == '.pdf':
-                    img = pdf_to_image(file_bytes, is_bytes=True)
+                    import fitz  # PyMuPDF
+                    # Abrir el PDF desde los bytes en memoria para contar páginas
+                    doc = fitz.open(stream=file_bytes, filetype="pdf")
+                    num_pages = len(doc)
+                    
+                    for page_num in range(num_pages):
+                        status_text.text(f"Procesando: {uploaded_file.name} (Pág. {page_num+1}/{num_pages})")
+                        
+                        # Convertir la página actual a imagen PIL
+                        img = pdf_to_image(file_bytes, is_bytes=True, page_num=page_num)
+                        img_b64 = image_to_base64(img)
+                        
+                        # Nombre para identificar el origen y la página
+                        nombre_mostrar = f"{uploaded_file.name} (Pág. {page_num+1})" if num_pages > 1 else uploaded_file.name
+                        
+                        # Extraer datos con Gemini
+                        data_dict = process_single_invoice(img_b64, nombre_mostrar, tipo_factura_str)
+                        
+                        # Filtrar páginas que no contienen facturas (nro_factura y monto_total nulos)
+                        if data_dict.get('nro_factura') is None and data_dict.get('monto_total') is None:
+                            continue
+                            
+                        results.append(data_dict)
+                    doc.close()
                 else:
                     img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-                    
-                # Convertir a base64
-                img_b64 = image_to_base64(img)
-                
-                # Extraer datos con Gemini
-                data_dict = process_single_invoice(img_b64, uploaded_file.name, tipo_factura_str)
-                results.append(data_dict)
+                    img_b64 = image_to_base64(img)
+                    data_dict = process_single_invoice(img_b64, uploaded_file.name, tipo_factura_str)
+                    results.append(data_dict)
                 
             except Exception as e:
                 st.error(f"Error procesando {uploaded_file.name}: {str(e)}")
