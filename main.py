@@ -17,15 +17,108 @@ load_dotenv()
 
 class InvoiceData(BaseModel):
     """Esquema de datos para la extracción de información de la factura."""
-    nro_factura: Optional[str] = Field(description="Número identificador de la factura.")
-    ruc_vendedor: Optional[str] = Field(description="RUC de la empresa que vende o emite la factura.")
-    ruc_cliente: Optional[str] = Field(description="RUC del cliente que compra o a quien va dirigida la factura.")
+    nro_factura: Optional[str] = Field(description="Número identificador de la factura con formato xxx-xxx-xxxxxxx.")
+    ruc_vendedor: Optional[str] = Field(description="RUC de la empresa que vende o emite la factura. Incluir dígito verificador si está disponible.")
+    ruc_cliente: Optional[str] = Field(description="RUC del cliente que compra o a quien va dirigida la factura. Incluir dígito verificador si está disponible.")
+    nombre_vendedor: Optional[str] = Field(description="Razón social o nombre de la empresa que emite la factura (vendedor).")
+    nombre_cliente: Optional[str] = Field(description="Razón social o nombre del cliente a quien va dirigida la factura (comprador).")
     fecha: Optional[str] = Field(description="Fecha de emisión en formato DD/MM/YYYY.")
-    timbrado: Optional[str] = Field(description="Número de timbrado legal.")
+    timbrado: Optional[str] = Field(description="Número de timbrado legal de 8 dígitos.")
     monto_total: Optional[float] = Field(description="Suma total de la factura.")
-    gravado_10: Optional[float] = Field(description="Monto imponible al 10%.")
-    gravado_5: Optional[float] = Field(description="Monto imponible al 5%.")
+    gravado_10: Optional[float] = Field(description="Monto imponible al 10% (IVA incluido).")
+    gravado_5: Optional[float] = Field(description="Monto imponible al 5% (IVA incluido).")
     exenta: Optional[float] = Field(description="Monto de artículos o servicios exentos de impuestos.")
+    condicion_operacion: Optional[str] = Field(description="Condición de la operación. Debe ser estrictamente 'Contado' o 'Crédito'.")
+    tipo_comprobante: Optional[str] = Field(description="Tipo de comprobante. Debe ser 'Factura', 'Nota de Crédito', 'Autofactura', 'Boleta de Venta' o 'Ticket'.")
+    nro_comprobante_asociado: Optional[str] = Field(description="Número de comprobante asociado (xxx-xxx-xxxxxxx) si es una Nota de Crédito/Débito.")
+    timbrado_asociado: Optional[str] = Field(description="Número de timbrado asociado (8 dígitos) si es una Nota de Crédito/Débito.")
+    es_factura_electronica: Optional[bool] = Field(description="Verdadero si es una factura electrónica (suele decir KuDE o Documento Electrónico). Falso si es preimpresa o autoimpresor.")
+
+def clean_ruc_and_get_type(ruc_raw: Optional[str], default_tipo_registro: str) -> tuple[str, int]:
+    """Limpia el RUC o Cédula y devuelve el número sin DV y el tipo de identificación (11=RUC, 12=Cédula, 15=Sin Nombre)."""
+    if not ruc_raw or str(ruc_raw).strip().lower() in ["null", "none", "sin nombre", ""]:
+        return "", 15
+    
+    raw_str = str(ruc_raw).strip()
+    
+    # Si contiene guión, se asume RUC (11). Se separa el número del DV.
+    if "-" in raw_str:
+        parts = raw_str.split("-")
+        num = parts[0].strip()
+        num_clean = "".join(filter(str.isalnum, num))
+        return num_clean, 11
+        
+    # Eliminar cualquier carácter que no sea alfanumérico
+    num_clean = "".join(filter(str.isalnum, raw_str))
+    
+    # Para compras, el vendedor siempre tiene RUC (11)
+    if default_tipo_registro == "compra":
+        return num_clean, 11
+        
+    # Para ventas, si la longitud es mayor o igual a 8 o comienza con 800 (empresas paraguayas), asumimos RUC (11).
+    # De lo contrario, si tiene dígitos, asumimos Cédula de Identidad (12).
+    if num_clean.isdigit():
+        if len(num_clean) >= 8 or num_clean.startswith("80"):
+            return num_clean, 11
+        return num_clean, 12
+        
+    return num_clean, 11
+
+def format_invoice_number(nro: Optional[str]) -> str:
+    """Formatea el número de factura a la estructura obligatoria ###-###-#######."""
+    if not nro:
+        return ""
+    
+    # Limpiar y extraer solo dígitos
+    digits = "".join(filter(str.isdigit, str(nro)))
+    
+    if len(digits) == 13:
+        return f"{digits[0:3]}-{digits[3:6]}-{digits[6:13]}"
+    elif len(digits) > 0:
+        clean_str = str(nro).strip()
+        parts = [p.strip() for p in clean_str.split("-") if p.strip()]
+        if len(parts) == 3:
+            try:
+                p1 = parts[0].zfill(3)
+                p2 = parts[1].zfill(3)
+                p3 = parts[2].zfill(7)
+                return f"{p1}-{p2}-{p3}"
+            except Exception:
+                pass
+    return str(nro).strip()
+
+def map_tipo_comprobante(tipo_str: Optional[str]) -> int:
+    """Mapea la descripción del comprobante al código numérico de la SET (Tabla 4)."""
+    if not tipo_str:
+        return 109 # Por defecto Factura
+        
+    t_lower = tipo_str.lower()
+    if "nota de crédito" in t_lower or "nota de credito" in t_lower or "credito" in t_lower or "crédito" in t_lower:
+        return 110
+    elif "nota de débito" in t_lower or "nota de debito" in t_lower or "debito" in t_lower or "débito" in t_lower:
+        return 111
+    elif "autofactura" in t_lower:
+        return 101
+    elif "boleta resimple" in t_lower or "resimple" in t_lower:
+        return 104
+    elif "boleta de venta" in t_lower:
+        return 103
+    elif "ticket" in t_lower:
+        return 112
+    elif "despacho" in t_lower:
+        return 107
+    
+    return 109 # Por defecto Factura
+
+def map_condicion(condicion_str: Optional[str]) -> int:
+    """Mapea la condición a 1 (Contado) o 2 (Crédito)."""
+    if not condicion_str:
+        return 1 # Default Contado
+        
+    c_lower = condicion_str.lower()
+    if "crédito" in c_lower or "credito" in c_lower or "2" in c_lower:
+        return 2
+    return 1 # Contado
 
 def pdf_to_image(pdf_input, is_bytes: bool = False, page_num: int = 0) -> Image.Image:
     """Convierte una página específica de un PDF a una imagen de alta resolución usando PyMuPDF."""
@@ -63,16 +156,22 @@ def extract_invoice_data(img_base64: str, tipo_factura: str = "compra") -> Invoi
     structured_llm = llm.with_structured_output(InvoiceData)
     
     contexto = (
-        "Esta es una factura de VENTA. Extrae el RUC del CLIENTE (a quien le facturamos) en 'ruc_cliente'." 
-        if tipo_factura == "venta" else 
-        "Esta es una factura de COMPRA. Extrae el RUC del VENDEDOR (quien emite la factura) en 'ruc_vendedor'."
+        "Esta es una factura de VENTA (emitida por nosotros). Extrae el RUC del CLIENTE (comprador) en 'ruc_cliente' "
+        "y su nombre/razón social en 'nombre_cliente'."
+        if tipo_factura == "venta" else
+        "Esta es una factura de COMPRA (recibida por nosotros). Extrae el RUC del VENDEDOR (emisor) en 'ruc_vendedor' "
+        "y su nombre/razón social en 'nombre_vendedor'. También extrae el RUC del CLIENTE (comprador) en 'ruc_cliente'."
     )
     
     prompt_text = (
-        "Actúa como un experto en contabilidad. Analiza la imagen de la factura adjunta "
-        "y extrae la siguiente información estrictamente en formato JSON. Si un dato no está presente, devuelve null.\n"
+        "Actúa como un experto en contabilidad paraguaya. Analiza la imagen de la factura adjunta "
+        "y extrae la información requerida estrictamente según el esquema JSON especificado. Si un dato no está presente, devuelve null.\n"
         f"CONTEXTO IMPORTANTE: {contexto}\n"
-        "Regla de oro: No incluyas texto explicativo, solo el objeto JSON puro."
+        "Asegúrate de extraer:\n"
+        "- 'condicion_operacion': Debe ser 'Contado' o 'Crédito'. Busca términos como 'Condición de venta', 'Contado', 'Crédito'.\n"
+        "- 'tipo_comprobante': Determina si es 'Factura', 'Nota de Crédito', 'Autofactura', 'Boleta de Venta' o 'Ticket'.\n"
+        "- Si el comprobante es una Nota de Crédito o Débito, busca y extrae en 'nro_comprobante_asociado' y 'timbrado_asociado' los datos de la factura original que se está afectando.\n"
+        "Regla de oro: No incluyas texto explicativo, solo el objeto JSON puro estructurado."
     )
     
     # Crear mensaje multimodal para Langchain
@@ -112,7 +211,26 @@ def process_single_invoice(img_b64: str, file_name: str, tipo_factura: str = "co
     data_dict['suma_validada'] = is_valid
     data_dict['archivo_origen'] = file_name
     
+    # Procesar campos para Marangatu
+    tipo_reg = 2 if tipo_factura == "compra" else 1
+    ruc_raw = data_dict.get('ruc_vendedor') if tipo_factura == "compra" else data_dict.get('ruc_cliente')
+    nombre_raw = data_dict.get('nombre_vendedor') if tipo_factura == "compra" else data_dict.get('nombre_cliente')
+    
+    identificacion_clean, tipo_id = clean_ruc_and_get_type(ruc_raw, tipo_factura)
+    
+    data_dict['tipo_registro_marangatu'] = tipo_reg
+    data_dict['tipo_identificacion_marangatu'] = tipo_id
+    data_dict['identificacion_marangatu'] = identificacion_clean
+    data_dict['nombre_marangatu'] = str(nombre_raw or "").strip()
+    data_dict['tipo_comprobante_marangatu'] = map_tipo_comprobante(data_dict.get('tipo_comprobante'))
+    data_dict['nro_comprobante_marangatu'] = format_invoice_number(data_dict.get('nro_factura'))
+    data_dict['condicion_marangatu'] = map_condicion(data_dict.get('condicion_operacion'))
+    data_dict['nro_comprobante_asociado_marangatu'] = format_invoice_number(data_dict.get('nro_comprobante_asociado'))
+    data_dict['es_factura_electronica'] = data_dict.get('es_factura_electronica', False)
+    
     return data_dict
+
+
 
 def process_invoices(input_folder: str = "input_facturas", output_excel: str = "facturas_procesadas.xlsx", tipo_factura: str = "compra"):
     """Procesa todas las facturas en la carpeta de entrada y las guarda en Excel."""
@@ -137,19 +255,35 @@ def process_invoices(input_folder: str = "input_facturas", output_excel: str = "
         try:
             ext_lower = os.path.splitext(file_path)[1].lower()
             if ext_lower == '.pdf':
-                # 1. Convertir primera página a imagen
-                img = pdf_to_image(file_path, is_bytes=False)
+                # Procesar todas las páginas del PDF
+                doc = fitz.open(file_path)
+                num_pages = len(doc)
+                doc.close()
+                
+                for page_num in range(num_pages):
+                    img = pdf_to_image(file_path, is_bytes=False, page_num=page_num)
+                    img_b64 = image_to_base64(img)
+                    
+                    nombre_mostrar = f"{os.path.basename(file_path)} (Pág. {page_num+1})" if num_pages > 1 else os.path.basename(file_path)
+                    
+                    data_dict = process_single_invoice(img_b64, nombre_mostrar, tipo_factura)
+                    
+                    # Filtrar páginas que no parecen facturas
+                    if data_dict.get('nro_factura') is None and data_dict.get('monto_total') is None:
+                        continue
+                        
+                    results.append(data_dict)
+                    print(f"  -> Pág. {page_num+1}: Éxito. Validado (Suma correcta): {data_dict['suma_validada']}")
             else:
                 # 1. Cargar imagen directamente
                 img = Image.open(file_path).convert("RGB")
+                img_b64 = image_to_base64(img)
                 
-            img_b64 = image_to_base64(img)
-            
-            # 2. Extraer y validar datos
-            data_dict = process_single_invoice(img_b64, os.path.basename(file_path), tipo_factura)
-            
-            results.append(data_dict)
-            print(f"  -> Éxito. Validado (Suma correcta): {data_dict['suma_validada']}")
+                # 2. Extraer y validar datos
+                data_dict = process_single_invoice(img_b64, os.path.basename(file_path), tipo_factura)
+                
+                results.append(data_dict)
+                print(f"  -> Éxito. Validado (Suma correcta): {data_dict['suma_validada']}")
             
         except Exception as e:
             print(f"  -> Error procesando {file_path}: {e}")
