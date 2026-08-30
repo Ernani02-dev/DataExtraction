@@ -8,15 +8,18 @@ import pandas as pd
 from PIL import Image
 import io
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
+from typing import Optional, Any
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
+import gc
 
 # Cargar variables de entorno
 load_dotenv()
 
+# Se mantiene InvoiceData estático por si se necesita fallback o retrocompatibilidad
 class InvoiceData(BaseModel):
-    """Esquema de datos para la extracción de información de la factura."""
+    """Esquema de datos por defecto (estático)."""
     nro_factura: Optional[str] = Field(description="Número identificador de la factura con formato xxx-xxx-xxxxxxx.")
     ruc_vendedor: Optional[str] = Field(description="RUC de la empresa que vende o emite la factura. Incluir dígito verificador si está disponible.")
     ruc_cliente: Optional[str] = Field(description="RUC del cliente que compra o a quien va dirigida la factura. Incluir dígito verificador si está disponible.")
@@ -32,7 +35,17 @@ class InvoiceData(BaseModel):
     tipo_comprobante: Optional[str] = Field(description="Tipo de comprobante. Debe ser 'Factura', 'Nota de Crédito', 'Autofactura', 'Boleta de Venta' o 'Ticket'.")
     nro_comprobante_asociado: Optional[str] = Field(description="Número de comprobante asociado (xxx-xxx-xxxxxxx) si es una Nota de Crédito/Débito.")
     timbrado_asociado: Optional[str] = Field(description="Número de timbrado asociado (8 dígitos) si es una Nota de Crédito/Débito.")
-    es_factura_electronica: Optional[bool] = Field(description="Verdadero si es una factura electrónica (suele decir KuDE o Documento Electrónico). Falso si es preimpresa o autoimpresor.")
+    es_factura_electronica: Optional[bool] = Field(description="Verdadero si es una factura electrónica. Falso si es preimpresa o autoimpresor.")
+
+def create_dynamic_model(schema_def: dict):
+    """Crea un modelo Pydantic dinámicamente basado en la definición de la base de datos."""
+    fields = {}
+    for field in schema_def.get("fields", []):
+        field_type = str if field.get("type") == "string" else float if field.get("type") == "number" else str
+        fields[field["name"]] = (Optional[field_type], Field(description=field.get("description", "")))
+    
+    return create_model(schema_def.get("name", "DynamicSchema"), **fields)
+
 
 def clean_ruc_and_get_type(ruc_raw: Optional[str], default_tipo_registro: str) -> tuple[str, int]:
     """Limpia el RUC o Cédula y devuelve el número sin DV y el tipo de identificación (11=RUC, 12=Cédula, 15=Sin Nombre)."""
@@ -145,34 +158,46 @@ def image_to_base64(img: Image.Image) -> str:
     img.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-def extract_invoice_data(img_base64: str, tipo_factura: str = "compra") -> InvoiceData:
+def extract_invoice_data(img_base64: str, tipo_factura: str = "compra", schema_def: dict = None) -> Any:
     """Envía la imagen a Gemini usando Langchain y extrae el JSON estructurado."""
     llm = ChatGoogleGenerativeAI(
         model="gemini-3.1-flash-lite-preview",
         temperature=0.0
     )
     
-    # Forzar el output a nuestra clase Pydantic
-    structured_llm = llm.with_structured_output(InvoiceData)
+    # Determinar el modelo estructurado
+    if schema_def:
+        TargetModel = create_dynamic_model(schema_def)
+    else:
+        TargetModel = InvoiceData
+        
+    structured_llm = llm.with_structured_output(TargetModel)
     
-    contexto = (
-        "Esta es una factura de VENTA (emitida por nosotros). Extrae el RUC del CLIENTE (comprador) en 'ruc_cliente' "
-        "y su nombre/razón social en 'nombre_cliente'."
-        if tipo_factura == "venta" else
-        "Esta es una factura de COMPRA (recibida por nosotros). Extrae el RUC del VENDEDOR (emisor) en 'ruc_vendedor' "
-        "y su nombre/razón social en 'nombre_vendedor'. También extrae el RUC del CLIENTE (comprador) en 'ruc_cliente'."
-    )
-    
-    prompt_text = (
-        "Actúa como un experto en contabilidad paraguaya. Analiza la imagen de la factura adjunta "
-        "y extrae la información requerida estrictamente según el esquema JSON especificado. Si un dato no está presente, devuelve null.\n"
-        f"CONTEXTO IMPORTANTE: {contexto}\n"
-        "Asegúrate de extraer:\n"
-        "- 'condicion_operacion': Debe ser 'Contado' o 'Crédito'. Busca términos como 'Condición de venta', 'Contado', 'Crédito'.\n"
-        "- 'tipo_comprobante': Determina si es 'Factura', 'Nota de Crédito', 'Autofactura', 'Boleta de Venta' o 'Ticket'.\n"
-        "- Si el comprobante es una Nota de Crédito o Débito, busca y extrae en 'nro_comprobante_asociado' y 'timbrado_asociado' los datos de la factura original que se está afectando.\n"
-        "Regla de oro: No incluyas texto explicativo, solo el objeto JSON puro estructurado."
-    )
+    if schema_def:
+        prompt_text = (
+            f"Analiza la imagen adjunta y extrae la información requerida estrictamente "
+            f"según el esquema JSON. Si un dato no está presente, devuelve null.\n"
+            f"Descripción general del documento: {schema_def.get('description', '')}\n"
+            "Regla de oro: No incluyas texto explicativo, solo el objeto JSON puro estructurado."
+        )
+    else:
+        contexto = (
+            "Esta es una factura de VENTA (emitida por nosotros). Extrae el RUC del CLIENTE (comprador) en 'ruc_cliente' "
+            "y su nombre/razón social en 'nombre_cliente'."
+            if tipo_factura == "venta" else
+            "Esta es una factura de COMPRA (recibida por nosotros). Extrae el RUC del VENDEDOR (emisor) en 'ruc_vendedor' "
+            "y su nombre/razón social en 'nombre_vendedor'. También extrae el RUC del CLIENTE (comprador) en 'ruc_cliente'."
+        )
+        prompt_text = (
+            "Actúa como un experto en contabilidad paraguaya. Analiza la imagen de la factura adjunta "
+            "y extrae la información requerida estrictamente según el esquema JSON especificado. Si un dato no está presente, devuelve null.\n"
+            f"CONTEXTO IMPORTANTE: {contexto}\n"
+            "Asegúrate de extraer:\n"
+            "- 'condicion_operacion': Debe ser 'Contado' o 'Crédito'. Busca términos como 'Condición de venta', 'Contado', 'Crédito'.\n"
+            "- 'tipo_comprobante': Determina si es 'Factura', 'Nota de Crédito', 'Autofactura', 'Boleta de Venta' o 'Ticket'.\n"
+            "- Si el comprobante es una Nota de Crédito o Débito, busca y extrae en 'nro_comprobante_asociado' y 'timbrado_asociado' los datos de la factura original que se está afectando.\n"
+            "Regla de oro: No incluyas texto explicativo, solo el objeto JSON puro estructurado."
+        )
     
     # Crear mensaje multimodal para Langchain
     message = HumanMessage(
@@ -188,45 +213,51 @@ def extract_invoice_data(img_base64: str, tipo_factura: str = "compra") -> Invoi
     response = structured_llm.invoke([message])
     return response
 
-def process_single_invoice(img_b64: str, file_name: str, tipo_factura: str = "compra") -> dict:
+def process_single_invoice(img_b64: str, file_name: str, tipo_factura: str = "compra", schema_def: dict = None) -> dict:
     """Extrae y valida los datos de una sola factura, devolviendo un diccionario estructurado."""
-    invoice_data = extract_invoice_data(img_b64, tipo_factura)
+    invoice_data = extract_invoice_data(img_b64, tipo_factura, schema_def)
     
     try:
         data_dict = invoice_data.model_dump()
     except AttributeError:
         data_dict = invoice_data.dict()
     
-    gravado_10 = data_dict.get('gravado_10') or 0.0
-    gravado_5 = data_dict.get('gravado_5') or 0.0
-    exenta = data_dict.get('exenta') or 0.0
-    monto_total = data_dict.get('monto_total') or 0.0
-    
-    suma_parciales = gravado_10 + gravado_5 + exenta
-    
-    is_valid = False
-    if abs(suma_parciales - monto_total) <= 1.0:
-        is_valid = True
+    # Solo hacer la validación de sumas si estamos usando el modelo default y existen los campos
+    if not schema_def or all(k in data_dict for k in ['gravado_10', 'gravado_5', 'exenta', 'monto_total']):
+        gravado_10 = data_dict.get('gravado_10') or 0.0
+        gravado_5 = data_dict.get('gravado_5') or 0.0
+        exenta = data_dict.get('exenta') or 0.0
+        monto_total = data_dict.get('monto_total') or 0.0
         
-    data_dict['suma_validada'] = is_valid
+        suma_parciales = gravado_10 + gravado_5 + exenta
+        
+        is_valid = False
+        if abs(suma_parciales - monto_total) <= 1.0:
+            is_valid = True
+            
+        data_dict['suma_validada'] = is_valid
+    else:
+        data_dict['suma_validada'] = True # Omitir validación estricta para esquemas libres
+        
     data_dict['archivo_origen'] = file_name
     
-    # Procesar campos para Marangatu
-    tipo_reg = 2 if tipo_factura == "compra" else 1
-    ruc_raw = data_dict.get('ruc_vendedor') if tipo_factura == "compra" else data_dict.get('ruc_cliente')
-    nombre_raw = data_dict.get('nombre_vendedor') if tipo_factura == "compra" else data_dict.get('nombre_cliente')
-    
-    identificacion_clean, tipo_id = clean_ruc_and_get_type(ruc_raw, tipo_factura)
-    
-    data_dict['tipo_registro_marangatu'] = tipo_reg
-    data_dict['tipo_identificacion_marangatu'] = tipo_id
-    data_dict['identificacion_marangatu'] = identificacion_clean
-    data_dict['nombre_marangatu'] = str(nombre_raw or "").strip()
-    data_dict['tipo_comprobante_marangatu'] = map_tipo_comprobante(data_dict.get('tipo_comprobante'))
-    data_dict['nro_comprobante_marangatu'] = format_invoice_number(data_dict.get('nro_factura'))
-    data_dict['condicion_marangatu'] = map_condicion(data_dict.get('condicion_operacion'))
-    data_dict['nro_comprobante_asociado_marangatu'] = format_invoice_number(data_dict.get('nro_comprobante_asociado'))
-    data_dict['es_factura_electronica'] = data_dict.get('es_factura_electronica', False)
+    # Procesar campos para Marangatu solo si existen en el diccionario (retrocompatibilidad)
+    if 'ruc_vendedor' in data_dict or 'ruc_cliente' in data_dict:
+        tipo_reg = 2 if tipo_factura == "compra" else 1
+        ruc_raw = data_dict.get('ruc_vendedor') if tipo_factura == "compra" else data_dict.get('ruc_cliente')
+        nombre_raw = data_dict.get('nombre_vendedor') if tipo_factura == "compra" else data_dict.get('nombre_cliente')
+        
+        identificacion_clean, tipo_id = clean_ruc_and_get_type(ruc_raw, tipo_factura)
+        
+        data_dict['tipo_registro_marangatu'] = tipo_reg
+        data_dict['tipo_identificacion_marangatu'] = tipo_id
+        data_dict['identificacion_marangatu'] = identificacion_clean
+        data_dict['nombre_marangatu'] = str(nombre_raw or "").strip()
+        data_dict['tipo_comprobante_marangatu'] = map_tipo_comprobante(data_dict.get('tipo_comprobante'))
+        data_dict['nro_comprobante_marangatu'] = format_invoice_number(data_dict.get('nro_factura'))
+        data_dict['condicion_marangatu'] = map_condicion(data_dict.get('condicion_operacion'))
+        data_dict['nro_comprobante_asociado_marangatu'] = format_invoice_number(data_dict.get('nro_comprobante_asociado'))
+        data_dict['es_factura_electronica'] = data_dict.get('es_factura_electronica', False)
     
     return data_dict
 
