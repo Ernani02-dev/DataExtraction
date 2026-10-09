@@ -1,5 +1,5 @@
 import streamlit as st
-from database import db
+from src.database.mongodb import db
 
 st.set_page_config(page_title="Facturas Premium - Dashboard", page_icon="📄", layout="wide")
 
@@ -55,29 +55,37 @@ st.markdown('<div class="main-title">📄 Dashboard Principal</div>', unsafe_all
 st.markdown('<div class="sub-title">Bienvenido al procesador de facturas y documentos inteligentes.</div>', unsafe_allow_html=True)
 
 # Métricas
-col1, col2, col3 = st.columns(3)
+#col1, col2, col3 = st.columns(3)
 
 try:
+    total_clients = db.clients_collection.count_documents({})
     total_schemas = db.document_schemas.count_documents({})
     total_profiles = db.export_profiles.count_documents({})
     total_records = db.extracted_records.count_documents({})
 except Exception as e:
+    total_clients = 0
     total_schemas = 0
     total_profiles = 0
     total_records = 0
     st.error(f"Error conectando a MongoDB: {e}. Asegúrate de que la base de datos esté corriendo.")
 
+col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.markdown(f'<div class="card"><div class="card-title">Tipos de Documento</div><div class="card-value">{total_schemas}</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="card"><div class="card-title">Clientes Activos</div><div class="card-value">{total_clients}</div></div>', unsafe_allow_html=True)
 with col2:
-    st.markdown(f'<div class="card"><div class="card-title">Perfiles de Exportación</div><div class="card-value">{total_profiles}</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="card"><div class="card-title">Tipos de Documento</div><div class="card-value">{total_schemas}</div></div>', unsafe_allow_html=True)
 with col3:
+    st.markdown(f'<div class="card"><div class="card-title">Perfiles de Exportación</div><div class="card-value">{total_profiles}</div></div>', unsafe_allow_html=True)
+with col4:
     st.markdown(f'<div class="card"><div class="card-title">Documentos Procesados</div><div class="card-value">{total_records}</div></div>', unsafe_allow_html=True)
 
 st.write("---")
 st.subheader("Navegación Rápida")
-c1, c2, c3 = st.columns(3)
+c0, c1, c2, c3 = st.columns(4)
 
+if c0.button("🧑‍💼 Gestionar Clientes", use_container_width=True, type="primary"):
+    st.switch_page("pages/0_Clientes.py")
+    
 if c1.button("🛠️ Configurar Esquemas", use_container_width=True, type="primary"):
     st.switch_page("pages/1_Esquemas.py")
     
