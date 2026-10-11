@@ -43,6 +43,7 @@ def _worker_process_document(task_info):
         record = {
             "schema_id": selected_schema_id,
             "client_id": task_info.get('client_id'),
+            "batch_id": task_info.get('batch_id'),
             "filename": nombre_mostrar,
             "extracted_data": data_dict,
             "created_at": datetime.utcnow()
@@ -106,6 +107,17 @@ def process_uploaded_files(uploaded_files, schema_def, selected_schema_id, selec
         total_tasks = len(tasks)
         completed_tasks = 0
         
+        client_data = db.get_client_by_id(selected_client_id)
+        if not client_data or not client_data.get("is_active", True):
+            if log_callback: log_callback("Error: Empresa inactiva.", is_error=True)
+            return []
+            
+        limit = client_data.get("monthly_doc_limit", 1000)
+        usage = client_data.get("current_month_usage", 0)
+        if usage + total_tasks > limit:
+            if log_callback: log_callback(f"Error: Límite mensual excedido. Quedan {limit - usage} docs.", is_error=True)
+            return []
+        
         if total_tasks > 0:
             if log_callback: log_callback(f"Procesando {total_tasks} elementos con IA (en paralelo)...")
             
@@ -119,6 +131,7 @@ def process_uploaded_files(uploaded_files, schema_def, selected_schema_id, selec
                     
                     if success:
                         results.append(data)
+                        db.increment_client_usage(selected_client_id, 1)
                     else:
                         if log_callback: log_callback(f"Error procesando {name_info}: {data}", is_error=True)
                     

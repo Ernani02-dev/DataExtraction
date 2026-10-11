@@ -41,39 +41,86 @@ with col2:
         profile_opts_filtered = {str(p["_id"]): p for p in valid_profiles}
         selected_profile_id = st.selectbox("3. Perfil de Exportación (Excel):", options=list(profile_opts_filtered.keys()), format_func=lambda x: profile_opts_filtered[x]["name"])
 
-uploaded_files = st.file_uploader("4. Sube tus facturas (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
-
 if "results" not in st.session_state:
     st.session_state["results"] = []
 
-if uploaded_files and selected_profile_id:
-    if st.button("Procesar Archivos con IA", type="primary", use_container_width=True):
-        schema_def = schema_opts[selected_schema_id]
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        def progress_callback(completed, total):
-            progress_bar.progress(completed / total)
+tab1, tab2 = st.tabs(["⚡ Procesamiento Directo (Pocos archivos)", "🚀 Procesamiento en Lotes (ZIP / Segundo Plano)"])
+
+with tab1:
+    uploaded_files = st.file_uploader("Sube tus facturas sueltas (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
+    
+    if uploaded_files and selected_profile_id:
+        if st.button("Procesar Directamente", type="primary", use_container_width=True):
+            schema_def = schema_opts[selected_schema_id]
             
-        def log_callback(msg, is_error=False):
-            if is_error:
-                st.error(msg)
-            else:
-                status_text.text(msg)
-        
-        # Delegar la orquestación pesada a la capa de servicios (Clean Architecture)
-        results = process_uploaded_files(
-            uploaded_files=uploaded_files,
-            schema_def=schema_def,
-            selected_schema_id=selected_schema_id,
-            selected_client_id=selected_client_id,
-            progress_callback=progress_callback,
-            log_callback=log_callback
-        )
-        
-        st.session_state["results"] = results
-        #st.rerun()
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            def progress_callback(completed, total):
+                progress_bar.progress(completed / total)
+                
+            def log_callback(msg, is_error=False):
+                if is_error:
+                    st.error(msg)
+                else:
+                    status_text.text(msg)
+            
+            results = process_uploaded_files(
+                uploaded_files=uploaded_files,
+                schema_def=schema_def,
+                selected_schema_id=selected_schema_id,
+                selected_client_id=selected_client_id,
+                progress_callback=progress_callback,
+                log_callback=log_callback
+            )
+            
+            st.session_state["results"] = results
+            st.rerun()
+
+with tab2:
+    st.info("Sube un archivo .zip con todas tus imágenes/PDFs. Se procesará en segundo plano.")
+    uploaded_zip = st.file_uploader("Sube tu archivo .zip", type=["zip"])
+    
+    if uploaded_zip and selected_profile_id:
+        if st.button("Enviar a Procesar en Segundo Plano", type="primary", use_container_width=True):
+            import os
+            import tempfile
+            from datetime import datetime
+            from src.tasks import process_zip_batch
+            
+            # Guardar zip temporalmente
+            temp_dir = tempfile.mkdtemp()
+            zip_path = os.path.join(temp_dir, uploaded_zip.name)
+            with open(zip_path, "wb") as f:
+                f.write(uploaded_zip.getvalue())
+                
+            # Crear batch en DB
+            batch_data = {
+                "client_id": selected_client_id,
+                "schema_id": selected_schema_id,
+                "file_name": uploaded_zip.name,
+                "status": "pending",
+                "upload_date": datetime.utcnow()
+            }
+            batch_id = db.create_batch(batch_data)
+            
+            # Enviar a Celery
+            process_zip_batch.delay(batch_id, zip_path, selected_schema_id, selected_client_id)
+            
+            st.success(f"¡Lote enviado! ID: {batch_id}. Puedes seguir usando la plataforma, el proceso corre en segundo plano.")
+            
+    # Mostrar lotes del cliente
+    if selected_client_id:
+        st.subheader("Tus Lotes Recientes")
+        batches = db.get_batches_by_client(selected_client_id)
+        if batches:
+            for b in batches:
+                status_color = "🟢" if b['status'] == 'completed' else "🟡" if b['status'] == 'processing' else "🔴" if b['status'] == 'failed' else "⚪"
+                progress = b.get('progress', '')
+                st.write(f"{status_color} **{b['file_name']}** - Estado: {b['status']} {progress}")
+        else:
+            st.write("No tienes lotes procesados.")
+
 
 if st.session_state["results"]:
     st.subheader("📊 Resultados Extraídos")

@@ -83,7 +83,10 @@ with st.form("new_client_form", clear_on_submit=True):
             new_client = {
                 "nombre": nombre.strip(),
                 "ruc": ruc.strip(),
-                "created_at": datetime.utcnow()
+                "created_at": datetime.utcnow(),
+                "is_active": True,
+                "monthly_doc_limit": 1000,
+                "current_month_usage": 0
             }
             db.create_client(new_client)
             st.success("Cliente guardado correctamente.")

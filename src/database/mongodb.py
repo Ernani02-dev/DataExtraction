@@ -31,6 +31,9 @@ def create_client(client_data: dict):
 def update_client(client_id: str, update_data: dict):
     clients_collection.update_one({"_id": ObjectId(client_id)}, {"$set": update_data})
 
+def increment_client_usage(client_id: str, count: int = 1):
+    clients_collection.update_one({"_id": ObjectId(client_id)}, {"$inc": {"current_month_usage": count}})
+
 def delete_client(client_id: str):
     clients_collection.delete_one({"_id": ObjectId(client_id)})
 
@@ -76,10 +79,30 @@ def save_extracted_record(record_data: dict):
     result = records_collection.insert_one(record_data)
     return str(result.inserted_id)
 
-def get_extracted_records(schema_id: str = None, client_id: str = None):
+def get_extracted_records(schema_id: str = None, client_id: str = None, batch_id: str = None):
     query = {}
     if schema_id:
         query["schema_id"] = schema_id
     if client_id:
         query["client_id"] = client_id
+    if batch_id:
+        query["batch_id"] = batch_id
     return list(records_collection.find(query).sort("created_at", -1))
+
+# ---- LOTES (BATCHES) ----
+def create_batch(batch_data: dict):
+    result = db["batches"].insert_one(batch_data)
+    return str(result.inserted_id)
+
+def get_batch_by_id(batch_id: str):
+    return db["batches"].find_one({"_id": ObjectId(batch_id)})
+
+def update_batch_status(batch_id: str, status: str, update_fields: dict = None):
+    data = {"status": status}
+    if update_fields:
+        data.update(update_fields)
+    db["batches"].update_one({"_id": ObjectId(batch_id)}, {"$set": data})
+
+def get_batches_by_client(client_id: str):
+    return list(db["batches"].find({"client_id": client_id}).sort("upload_date", -1))
+
