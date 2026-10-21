@@ -52,11 +52,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-title">📄 Dashboard Principal</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Bienvenido al procesador de facturas y documentos inteligentes.</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Bienvenido al procesador de facturas y documentos inteligentes con PostgreSQL.</div>', unsafe_allow_html=True)
 
 # Métricas
-#col1, col2, col3 = st.columns(3)
-
 try:
     total_clients = db.clients_collection.count_documents({})
     total_schemas = db.document_schemas.count_documents({})
@@ -67,7 +65,7 @@ except Exception as e:
     total_schemas = 0
     total_profiles = 0
     total_records = 0
-    st.error(f"Error conectando a MongoDB: {e}. Asegúrate de que la base de datos esté corriendo.")
+    st.error(f"Error conectando a PostgreSQL: {e}. Asegúrate de que la base de datos esté corriendo.")
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:

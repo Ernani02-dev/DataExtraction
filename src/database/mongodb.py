@@ -1,108 +1,182 @@
+"""
+Database Adapter (PostgreSQL 16 via SQLAlchemy 2.0).
+Provides full backward compatibility with the previous MongoDB interface
+while persisting all data directly to PostgreSQL with native JSONB.
+"""
+from typing import Any, Dict, List, Optional
 import streamlit as st
-from pymongo import MongoClient
-from bson.objectid import ObjectId
-from src.config import MONGODB_URI, DB_NAME
 
-@st.cache_resource
+from src.database import postgres as pg
+
+# Compatibility shim for ObjectId
+def ObjectId(val: Any) -> str:
+    """Compatibility shim returning string ID."""
+    return str(val) if val is not None else ""
+
+
+class CollectionProxy:
+    """Proxy providing MongoDB collection-like API backed by PostgreSQL."""
+
+    def __init__(self, model, name: str):
+        self.model = model
+        self.name = name
+
+    def count_documents(self, filter_dict: Optional[dict] = None) -> int:
+        with pg.get_db_session() as session:
+            return session.query(self.model).count()
+
+    def find(self, filter_dict: Optional[dict] = None):
+        filter_dict = filter_dict or {}
+        with pg.get_db_session() as session:
+            query = session.query(self.model)
+            client_id = filter_dict.get("client_id")
+            if client_id and hasattr(self.model, "client_id"):
+                query = query.filter(self.model.client_id == str(client_id))
+            schema_id = filter_dict.get("schema_id")
+            if schema_id and hasattr(self.model, "schema_id"):
+                query = query.filter(self.model.schema_id == str(schema_id))
+            return [item.to_dict() for item in query.all()]
+
+    def find_one(self, filter_dict: Optional[dict] = None):
+        filter_dict = filter_dict or {}
+        id_val = filter_dict.get("_id") or filter_dict.get("id")
+        if id_val:
+            str_id = str(id_val)
+            if self.name == "clients":
+                return pg.get_client_by_id(str_id)
+            elif self.name in ["schemas", "document_schemas"]:
+                return pg.get_schema_by_id(str_id)
+            elif self.name in ["export_profiles", "profiles"]:
+                return pg.get_profile_by_id(str_id)
+            elif self.name in ["batches", "batch"]:
+                return pg.get_batch_by_id(str_id)
+        res = self.find(filter_dict)
+        return res[0] if res else None
+
+    def insert_one(self, doc: dict):
+        if self.name == "clients":
+            cid = pg.create_client(doc)
+        elif self.name in ["schemas", "document_schemas"]:
+            cid = pg.create_schema(doc)
+        elif self.name in ["export_profiles", "profiles"]:
+            cid = pg.create_profile(doc)
+        elif self.name in ["extracted_records", "records"]:
+            cid = pg.save_extracted_record(doc)
+        elif self.name in ["batches", "batch"]:
+            cid = pg.create_batch(doc)
+        else:
+            cid = ""
+        
+        class InsertResult:
+            def __init__(self, inserted_id):
+                self.inserted_id = inserted_id
+        return InsertResult(cid)
+
+    def update_one(self, filter_dict: dict, update_dict: dict):
+        id_val = filter_dict.get("_id") or filter_dict.get("id")
+        data = update_dict.get("$set", update_dict)
+        inc_data = update_dict.get("$inc", {})
+        
+        if id_val:
+            str_id = str(id_val)
+            if self.name == "clients":
+                if inc_data and "current_month_usage" in inc_data:
+                    pg.increment_client_usage(str_id, inc_data["current_month_usage"])
+                if data:
+                    pg.update_client(str_id, data)
+            elif self.name in ["schemas", "document_schemas"]:
+                pg.update_schema(str_id, data)
+            elif self.name in ["export_profiles", "profiles"]:
+                pg.update_profile(str_id, data)
+            elif self.name in ["batches", "batch"]:
+                status = data.get("status", "processing")
+                pg.update_batch_status(str_id, status, data)
+
+    def delete_one(self, filter_dict: dict):
+        id_val = filter_dict.get("_id") or filter_dict.get("id")
+        if id_val:
+            str_id = str(id_val)
+            if self.name == "clients":
+                pg.delete_client(str_id)
+            elif self.name in ["schemas", "document_schemas"]:
+                pg.delete_schema(str_id)
+            elif self.name in ["export_profiles", "profiles"]:
+                pg.delete_profile(str_id)
+
+
+class DatabaseProxy:
+    """Database container object exposing collection proxies."""
+
+    def __init__(self):
+        self.clients_collection = CollectionProxy(pg.Client, "clients")
+        self.document_schemas = CollectionProxy(pg.Schema, "document_schemas")
+        self.export_profiles = CollectionProxy(pg.ExportProfile, "export_profiles")
+        self.extracted_records = CollectionProxy(pg.Record, "extracted_records")
+        self.batches = CollectionProxy(pg.Batch, "batches")
+
+    def __getitem__(self, item: str) -> CollectionProxy:
+        if item in ["batches", "batch"]:
+            return self.batches
+        elif item in ["document_schemas", "schemas"]:
+            return self.document_schemas
+        elif item in ["export_profiles", "profiles"]:
+            return self.export_profiles
+        elif item in ["extracted_records", "records"]:
+            return self.extracted_records
+        elif item in ["clients", "clients_collection"]:
+            return self.clients_collection
+        return CollectionProxy(None, item)
+
+
+# Auto-create tables on import or initialization
+try:
+    pg.init_db()
+except Exception:
+    # If connection not available yet at import time, will retry in get_database
+    pass
+
+
+@st.cache_resource(show_spinner=False)
 def get_database():
-    """Inicializa la conexión a la base de datos usando caché de Streamlit."""
-    client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=2000)
-    return client[DB_NAME]
+    """Initializes and returns the PostgreSQL database proxy using Streamlit caching."""
+    pg.init_db()
+    return DatabaseProxy()
 
+
+# Instantiate default DB proxy
 db = get_database()
 
-# Colecciones
+# Export collection references for legacy direct imports
 schemas_collection = db["document_schemas"]
 profiles_collection = db["export_profiles"]
 records_collection = db["extracted_records"]
 clients_collection = db["clients"]
 
-# ---- CLIENTES ----
-def get_all_clients():
-    return list(clients_collection.find({}))
+# Export DAO methods directly
+get_all_clients = pg.get_all_clients
+get_client_by_id = pg.get_client_by_id
+create_client = pg.create_client
+update_client = pg.update_client
+increment_client_usage = pg.increment_client_usage
+delete_client = pg.delete_client
 
-def get_client_by_id(client_id: str):
-    return clients_collection.find_one({"_id": ObjectId(client_id)})
+get_all_schemas = pg.get_all_schemas
+get_schema_by_id = pg.get_schema_by_id
+create_schema = pg.create_schema
+update_schema = pg.update_schema
+delete_schema = pg.delete_schema
 
-def create_client(client_data: dict):
-    result = clients_collection.insert_one(client_data)
-    return str(result.inserted_id)
+get_all_profiles = pg.get_all_profiles
+get_profile_by_id = pg.get_profile_by_id
+get_profiles_by_schema_id = pg.get_profiles_by_schema_id
+create_profile = pg.create_profile
+update_profile = pg.update_profile
+delete_profile = pg.delete_profile
 
-def update_client(client_id: str, update_data: dict):
-    clients_collection.update_one({"_id": ObjectId(client_id)}, {"$set": update_data})
+save_extracted_record = pg.save_extracted_record
+get_extracted_records = pg.get_extracted_records
 
-def increment_client_usage(client_id: str, count: int = 1):
-    clients_collection.update_one({"_id": ObjectId(client_id)}, {"$inc": {"current_month_usage": count}})
-
-def delete_client(client_id: str):
-    clients_collection.delete_one({"_id": ObjectId(client_id)})
-
-# ---- ESQUEMAS ----
-def get_all_schemas():
-    return list(schemas_collection.find({}))
-
-def get_schema_by_id(schema_id: str):
-    return schemas_collection.find_one({"_id": ObjectId(schema_id)})
-
-def create_schema(schema_data: dict):
-    result = schemas_collection.insert_one(schema_data)
-    return str(result.inserted_id)
-
-def update_schema(schema_id: str, update_data: dict):
-    schemas_collection.update_one({"_id": ObjectId(schema_id)}, {"$set": update_data})
-
-def delete_schema(schema_id: str):
-    schemas_collection.delete_one({"_id": ObjectId(schema_id)})
-
-# ---- PERFILES DE EXPORTACION ----
-def get_all_profiles():
-    return list(profiles_collection.find({}))
-
-def get_profile_by_id(profile_id: str):
-    return profiles_collection.find_one({"_id": ObjectId(profile_id)})
-
-def get_profiles_by_schema_id(schema_id: str):
-    return list(profiles_collection.find({"schema_id": schema_id}))
-
-def create_profile(profile_data: dict):
-    result = profiles_collection.insert_one(profile_data)
-    return str(result.inserted_id)
-
-def update_profile(profile_id: str, update_data: dict):
-    profiles_collection.update_one({"_id": ObjectId(profile_id)}, {"$set": update_data})
-
-def delete_profile(profile_id: str):
-    profiles_collection.delete_one({"_id": ObjectId(profile_id)})
-
-# ---- REGISTROS EXTRAIDOS ----
-def save_extracted_record(record_data: dict):
-    result = records_collection.insert_one(record_data)
-    return str(result.inserted_id)
-
-def get_extracted_records(schema_id: str = None, client_id: str = None, batch_id: str = None):
-    query = {}
-    if schema_id:
-        query["schema_id"] = schema_id
-    if client_id:
-        query["client_id"] = client_id
-    if batch_id:
-        query["batch_id"] = batch_id
-    return list(records_collection.find(query).sort("created_at", -1))
-
-# ---- LOTES (BATCHES) ----
-def create_batch(batch_data: dict):
-    result = db["batches"].insert_one(batch_data)
-    return str(result.inserted_id)
-
-def get_batch_by_id(batch_id: str):
-    return db["batches"].find_one({"_id": ObjectId(batch_id)})
-
-def update_batch_status(batch_id: str, status: str, update_fields: dict = None):
-    data = {"status": status}
-    if update_fields:
-        data.update(update_fields)
-    db["batches"].update_one({"_id": ObjectId(batch_id)}, {"$set": data})
-
-def get_batches_by_client(client_id: str):
-    return list(db["batches"].find({"client_id": client_id}).sort("upload_date", -1))
-
+create_batch = pg.create_batch
+get_batch_by_id = pg.get_batch_by_id
+update_batch_status = pg.update_batch_status
+get_batches_by_client = pg.get_batches_by_client
